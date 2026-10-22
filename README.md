@@ -1,6 +1,6 @@
-# php2shell — Refactored POC for CVE-2026-109618 / CVE-2026-109619
+# php2shell — One-shot RCE POC for CVE-2026-109618 / CVE-2026-109619
 
-A clean-room rewrite of the php2shell exploit for the two critical PHP core vulnerabilities disclosed on 21 October 2026. This is not a new vulnerability — the bugs are the same as in the original proof-of-concept by godylockz. What is new: the code has been rewritten for readability and understandability so that defenders can follow the exploit chain without needing C-level memory layout knowledge.
+A clean-room rewrite of the php2shell exploit for the two critical PHP core vulnerabilities disclosed on 21 October 2026. The code has been rewritten for readability and understandability so that defenders can follow the exploit chain without needing C-level memory layout knowledge.
 
 ## What it is
 
@@ -13,16 +13,6 @@ The exploit delivers an unauthenticated one-shot remote code execution against a
 
 The target needs only a minimal PHP page (`<?php echo "OK"; ?>`) and `session.upload_progress.enabled = 1` (the default). No authentication, no custom application code, no target-side files to upload.
 
-## How it differs from the original
-
-| Aspect | Original | This rewrite |
-|--------|----------|-------------|
-| Readability | Compact, minimal comments | Sectioned, inline docstrings, named constants |
-| Variable names | Shortened / golfed | Descriptive (`heap_base`, `libphp_base`, `stage3_pads`) |
-| Flow | Linear script with functions | Class-based `ExploitRunner` with stage methods |
-| Comments | C-level struct offsets | Plain-English explanation of each step |
-| Structure | One file, everything on one plane | Organized sections with headers and docstrings |
-
 ## Quick start
 
 ### Check mode (passive fingerprint)
@@ -30,8 +20,8 @@ The target needs only a minimal PHP page (`<?php echo "OK"; ?>`) and `session.up
 Check if a target is likely vulnerable without sending exploit traffic:
 
 ```bash
-python3 php2shell-refactored.py check -u http://target.example.com/
-python3 php2shell-refactored.py check -f targets.txt -o results.jsonl
+python3 php2shell.py check -u http://target.example.com/
+python3 php2shell.py check -f targets.txt -o results.jsonl
 ```
 
 Output:
@@ -49,7 +39,7 @@ Requires Apache mod_php prefork on Linux. Works against the Docker lab or any ma
 docker compose -f docker/docker-compose.yml up -d
 
 # Run (auto-derives libphp offsets from the container ELF)
-python3 php2shell-refactored.py exploit -u http://127.0.0.1:8088/index.php
+python3 php2shell.py exploit -u http://127.0.0.1:8088/index.php
 ```
 
 Expected output:
@@ -74,7 +64,7 @@ uid=33(www-data) gid=33(www-data) groups=33(www-data)
 ### Command line options
 
 ```
-python3 php2shell-refactored.py --help
+python3 php2shell.py --help
 ```
 
 **Check mode:**
@@ -191,7 +181,7 @@ Watch Apache/FPM error logs for unexpected child crashes (SIGABRT, SIGSEGV) duri
 
 | Path | Purpose |
 |------|---------|
-| `php2shell-refactored.py` | Refactored exploit (this rewrite) |
+| `php2shell.py` | One-shot RCE exploit |
 | `docker/docker-compose.yml` | Vulnerable target container |
 | `docker/php.ini` | PHP configuration |
 | `docker/apache.conf` | Single-worker prefork config |
@@ -206,7 +196,6 @@ Watch Apache/FPM error logs for unexpected child crashes (SIGABRT, SIGSEGV) duri
 - [GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp) — CVE-2026-109619
 - [Patch commit 3584a98](https://github.com/php/php-src/commit/3584a98bda)
 - [Sansec analysis](https://sansec.io/research/php2shell)
-- [Original POC by godylockz](https://github.com/godylockz/cve-2026-109618-php2shell)
 
 ## License
 

@@ -3,8 +3,7 @@
 """
 php2shell — one-shot RCE for CVE-2026-109618 / CVE-2026-109619
 
-Original proof-of-concept by godylockz.
-Refactored by dexteon: rewritten for readability and understandability.
+Rewritten for readability and understandability.
 """
 
 import argparse
