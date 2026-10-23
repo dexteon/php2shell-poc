@@ -1,23 +1,30 @@
-# php2shell — One-shot RCE POC for CVE-2026-109618 / CVE-2026-109619
+# php2shell: research and detection tooling for CVE-2026-109618 / CVE-2026-109619
 
-A clean-room rewrite of the php2shell exploit for the two critical PHP core vulnerabilities disclosed on 21 October 2026. The code has been rewritten for readability and understandability so that defenders can follow the exploit chain without needing C-level memory layout knowledge.
+Security research code for the two critical PHP core vulnerabilities disclosed on 21 October 2026. Written for vulnerability research and defensive triage: identify affected systems, understand the exploit chain, and verify patches. For authorized testing and educational use only. See the [disclaimer](#disclaimer) before running anything.
 
-## What it is
+- CVE-2026-109618 ([GHSA-w8hw-w9fx-j79w](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)): heap use-after-free in the `session.upload_progress` cleanup path
+- CVE-2026-109619 ([GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp)): corrupted session hash-table destructor leading to arbitrary function call
 
-The exploit delivers an unauthenticated one-shot remote code execution against any PHP installation with `session.upload_progress` enabled. It chains four stages over plain HTTP:
+Vendor advisories and patches: [php.net security archive](https://www.php.net/archive/2026.php), patch commit [3584a98](https://github.com/php/php-src/commit/3584a98bda).
 
-1. **Worker rotation** — trigger an OOM crash in the prefork worker, forcing a new process to spawn with the same address space layout
-2. **Heap leak** — leak heap chunk addresses via a corrupted PHPSESSID cookie
-3. **libphp leak** — leak the libphp base address (including the `zif_system` function pointer)
-4. **RCE** — forge a destructor call that routes into `system()`, executing the command
+## What this repo contains
 
-The target needs only a minimal PHP page (`<?php echo "OK"; ?>`) and `session.upload_progress.enabled = 1` (the default). No authentication, no custom application code, no target-side files to upload.
+`php2shell.py` implements two independent chains that reach the same bugs, plus a read-only fingerprint mode that sends no exploit traffic at all:
+
+| Mode | What it does | Traffic |
+|------|--------------|---------|
+| `check` | Fingerprints PHP version, SAPI type, and `upload_progress` state from response headers | Plain GET requests |
+| `exploit --vector uaf` | CVE-2026-109618 chain: session bucket UAF into a forged `zend_fcall_info` | Crafted multipart POSTs |
+| `exploit --vector pdetector` | CVE-2026-109619 chain: forged `pDestructor` into `zif_system` (stub; needs calibration data) | Crafted multipart POSTs |
+| `syms` | Extracts `zval_ptr_dtor` / `zend_call_function` offsets and their delta from a `libphp.so` ELF | Local binary analysis only |
+
+The default demo command is `id` (prints `uid=...` and exits). Nothing in this repo drops a shell, writes files to the target, or persists anything.
 
 ## Quick start
 
-### Check mode (passive fingerprint)
+### Check mode (read-only fingerprint)
 
-Check if a target is likely vulnerable without sending exploit traffic:
+Determine whether a target runs an affected PHP version without sending exploit traffic:
 
 ```bash
 python3 php2shell.py check -u http://target.example.com/
@@ -26,40 +33,28 @@ python3 php2shell.py check -f targets.txt -o results.jsonl
 
 Output:
 ```
-[VULNERABLE] http://target.example.com/  PHP 8.4.26
-[PATCHED] http://fixed.example.com/  PHP 8.4.27
+[VULNERABLE] http://target.example.com/  PHP 8.4.26  SAPI mod_php
+[PATCHED]   http://fixed.example.com/     PHP 8.4.27  SAPI mod_php
 ```
 
-### Exploit mode (RCE)
+### UAF exploit against the Docker lab
 
-Requires Apache mod_php prefork on Linux. Works against the Docker lab or any matching real target.
+The `uaf` vector exercises CVE-2026-109618 against a local lab container:
 
 ```bash
-# Start the Docker lab (see docker/)
 docker compose -f docker/docker-compose.yml up -d
-
-# Run (auto-derives libphp offsets from the container ELF)
-python3 php2shell.py exploit -u http://127.0.0.1:8088/index.php
+python3 php2shell.py exploit -u http://127.0.0.1:8088/index.php --vector uaf --command id
 ```
 
-Expected output:
-```
-[*] reading libphp offsets from container php2shell-target
-[*] target http://127.0.0.1:8088/index.php
-[*] cmd='sh</out/c' (original: 'id;hostname -I;hostname')
-[*] forcing worker rotation
-[*] running stage 1: heap leak
-[+] heap base = 0x...
-[*] running stage 2: libphp leak
-[+] libphp base = 0x...
-[*] running stage 3: trigger RCE
-[+] exploit succeeded
+The command must fit in 8 bytes (the forged record is 16 bytes total; 8 go to the leaked pointer). `id` is the default.
 
-PROOF:
-uid=33(www-data) gid=33(www-data) groups=33(www-data)
-172.19.0.2
-<container-hostname>
+### Symbol extraction
+
+```bash
+python3 php2shell.py syms /path/to/libphp.so
 ```
+
+Prints `dtor_offset`, `call_offset`, and `delta` using readelf, objdump, or a byte-scan fallback. Useful for building the per-build calibration tables that real targets need.
 
 ### Command line options
 
@@ -67,83 +62,66 @@ uid=33(www-data) gid=33(www-data) groups=33(www-data)
 python3 php2shell.py --help
 ```
 
-**Check mode:**
-- `-u URL` — single target URL
-- `-f FILE` — target list file (one URL per line, `#` comments allowed)
-- `-o FILE` — JSONL output file
-- `--workers N` — parallel workers (default: 4)
-- `--timeout SECS` — HTTP timeout (default: 10)
-- `-p PROXY` — proxy URL
-- `--json` — machine-readable JSON output
-- `-q` — quiet mode
+Check mode:
+- `-u URL` single target URL
+- `-f FILE` target list file (one URL per line, `#` comments allowed)
+- `-o FILE` JSONL output file
+- `-w N` parallel workers (default 5)
+- `-t SECS` HTTP timeout (default 10)
+- `--proxy HOST:PORT` SOCKS5 proxy
+- `--json` machine-readable JSON output
+- `-q` quiet mode
 
-**Exploit mode:**
-- `-u URL` — target URL (required)
-- `-c CMD` — command to execute (default: `id;hostname -I;hostname`)
-- `-o FILE` — write exploit output to file
-- `--profile PROFILE` — calibration profile: `workbook` (Debian 12 / Apache 2.4.69) or `lab` (Apache 2.4.68)
-- `--zif-offset 0x...` — override zif offset inside libphp
-- `--dtor-offset 0x...` — override destructor offset inside libphp
-- `--htdata-offset 0x...` — override htdata offset
-- `--container NAME` — Docker container name for automatic offset detection
-- `--offsets-file PATH` — pre-loaded offsets (hex or decimal values, key=value)
-- `--force` — override platform check (e.g. nginx)
-- `--no-preflight` — skip the preflight GET that checks the Server header
-- `--timeout SECS` — HTTP timeout (default: 30)
-- `-q` — quiet mode
+Exploit mode:
+- `-u URL` target URL (required)
+- `-c CMD` command to execute (default `id`, max 8 bytes for UAF)
+- `--vector uaf|pdetector` attack vector (default `uaf`)
+- `--dtor 0x...` DTOR leak address for UAF mode
+- `--delta 0x...` DTOR-to-call delta for UAF mode
+- `--syms PATH` extract offsets from a `libphp.so` before running
+- `--calib FILE` calibration file (pDetector)
+- `-q` quiet mode
 
-## Exploit chain — plain English
+## The two chains, briefly
 
-### Stage 0: Worker rotation
+The original php2shell chain (CVE-2026-109619, the `pdetector` vector) works in four stages over plain HTTP, all through `session.upload_progress`:
 
-The exploit first forces the PHP prefork worker to crash via an out-of-memory condition. When the worker respawns, it inherits the same address space layout. This is the key to the whole attack — the leaked pointers from stages 1 and 2 remain valid because the new worker has the same memory layout as the old one.
+1. Worker rotation. Force an OOM crash in an Apache prefork worker. The replacement process inherits the same address space layout.
+2. Heap leak. A crafted multipart POST triggers an out-of-bounds read in session cookie handling, leaking heap chunk addresses through `Set-Cookie`.
+3. libphp leak. A corrupted pointer in session state leaks the `pDestructor` address. Since `pDestructor = libphp_base + dtor_offset`, this reveals the libphp base and therefore `zif_system`.
+4. Call. Forge a hash table whose destructor points at `system()` with the embedded command.
 
-This only works with Apache mod_php prefork on Linux because it relies on `fork()` (copy-on-write). Windows Apache builds don't use `fork()`; they use thread pools, which randomize memory on every spawn.
+The PHP-UP-2026 chain (CVE-2026-109618, the `uaf` vector) takes a different route into the same session machinery. Two bucket pointers cached during upload-progress tracking survive into a freed array. A second `update()` call destroys the previous session tree through `zval_ptr_dtor`, the freed bucket is reclaimed with attacker-shaped data, and the stale pointer lands a forged `zend_fcall_info` / `zend_internal_function` that ends up calling `system()`. It needs `session.upload_progress.enabled = 1` (the PHP default) and works on both mod_php and php-fpm.
 
-### Stage 1: Heap leak
-
-With the worker in a corrupted state, the exploit sends a crafted multipart POST that triggers an out-of-bounds read in PHP's session cookie handling. The read leaks heap chunk addresses into the `Set-Cookie` header. By analyzing the leaked cookie data, the exploit identifies the base of the Zend memory manager — the heap region where PHP stores its data structures.
-
-### Stage 2: libphp leak
-
-Using the heap base from stage 1, the exploit sends another crafted request that places a corrupted pointer into the session state. A follow-up read leaks a pointer into libphp.so — specifically, the `pDestructor` function pointer that PHP uses to clean up hash tables. Since `pDestructor = libphp_base + dtor_offset`, the exploit can compute the base address of libphp.so.
-
-This is critical because the base address lets the exploit compute the address of `zif_system`, the PHP internal function that executes shell commands.
-
-### Stage 3: RCE
-
-With the libphp base known, the exploit constructs a forged HashTable in memory that tells PHP to call `system(command)` when it "deletes" the hash table. The exploit sends a final multipart POST that triggers this chain:
-
-`session handler` -> `zval_ptr_dtor` -> `zend_array_destroy` -> `pDestructor(command)` -> `system("sh</out/c")`
-
-The command is embedded directly in the forged structure. Commands longer than 14 bytes are written to `out/c` and executed via `sh</out/c` (a standard trick to bypass the size limit).
+Full plain-English writeup of the original chain: see the [References](#references) section.
 
 ## Platform scope
 
-This exploit is **Linux only** because:
-- Stage 0 requires `fork()` for copy-on-write worker rotation
-- Offsets (`zif_offset`, `dtor_offset`, `htdata_offset`) index `libphp.so` (ELF format)
-- The `system("sh</out/c")` payload is POSIX
+The exploit stages are Linux-only:
 
-The two underlying bugs exist in the C code that PHP compiles for all platforms, so Windows PHP builds are vulnerable in principle. But the exploit would need retuning of offsets and a different crash-survival mechanism to work on Windows.
+- Stage 0 of the pdetector chain requires `fork()` copy-on-write (Apache mod_php prefork)
+- Offsets index `libphp.so`, an ELF shared object
+- The `id` payload is POSIX
 
-ASLR is not a barrier — the `Set-Cookie` out-of-bounds read in stage 2 leaks the heap and libphp base addresses directly, so full ASLR/PIE is read off the wire.
+The UAF vector avoids the fork requirement and can work over php-fpm. The underlying bugs exist in PHP on every platform; only the delivery mechanics are Linux-specific.
+
+ASLR is not a barrier for either chain: the leaks in stage 2 read the heap and libphp base addresses off the wire.
 
 ## Affected versions
 
-All PHP versions with `session.upload_progress` enabled (introduced in 5.4.0):
+All PHP branches with `session.upload_progress` compiled in (introduced in 5.4.0):
 
 | Branch | Vulnerable | Fixed |
-|--------|-----------|-------|
+|--------|------------|-------|
 | 8.5 | <= 8.5.11 | 8.5.12 |
 | 8.4 | <= 8.4.26 | 8.4.27 |
 | 8.3 | <= 8.3.35 | 8.3.36 |
 | 8.2 | <= 8.2.34 | 8.2.35 |
-| 8.1 and older | All | EOL — no patch |
+| 8.1 and older | All | EOL, no patch |
 
 ## Detection and mitigation
 
-### Immediate check
+### Check a host
 
 ```bash
 php -v
@@ -153,13 +131,12 @@ curl -sI https://example.com/ | grep X-Powered-By
 
 ### Patch
 
-Update PHP to the fixed version and restart all workers:
 ```bash
 apt update && apt upgrade php*
 systemctl restart apache2  # or php-fpm
 ```
 
-### Mitigate (if patching is not immediately possible)
+### Mitigate without patching
 
 ```ini
 ; php.ini or FPM pool config
@@ -167,7 +144,8 @@ session.upload_progress.enabled = Off
 session.use_only_cookies = On
 ```
 
-For CVE-2026-109618 specifically, lowering `post_max_size` and raising `memory_limit` reduces the OOM surface:
+For CVE-2026-109618, lowering `post_max_size` and raising `memory_limit` also shrinks the OOM surface:
+
 ```ini
 post_max_size = 8M
 memory_limit = 256M
@@ -175,27 +153,31 @@ memory_limit = 256M
 
 ### Monitor
 
-Watch Apache/FPM error logs for unexpected child crashes (SIGABRT, SIGSEGV) during normal traffic. Unusual multipart POST requests containing `PHP_SESSION_UPLOAD_PROGRESS` fields to endpoints that do not expect file uploads are suspicious.
+Watch Apache and FPM error logs for unexpected child crashes (SIGABRT, SIGSEGV) during normal traffic. Multipart POST requests carrying `PHP_SESSION_UPLOAD_PROGRESS` fields to endpoints that never expected file uploads are the signature to alert on.
 
 ## Files
 
 | Path | Purpose |
 |------|---------|
-| `php2shell.py` | One-shot RCE exploit |
-| `docker/docker-compose.yml` | Vulnerable target container |
-| `docker/php.ini` | PHP configuration |
+| `php2shell.py` | Fingerprint, exploit, and symbol-extraction tooling |
+| `docker/docker-compose.yml` | Vulnerable lab container (Apache prefork, PHP 8.x) |
+| `docker/php.ini` | Lab PHP configuration |
 | `docker/apache.conf` | Single-worker prefork config |
-| `docker/offsets.py` | Auto-read libphp offsets from container ELF |
-| `docker/www/index.php` | Minimal target page |
-| `out/` | Proof output and offset cache |
+| `docker/offsets.py` | Reads libphp offsets from the container ELF |
+| `docker/www/index.php` | Minimal target page (`<?php echo "OK"; ?>`) |
 
 ## References
 
-- [PHP security advisory 2026-10-21](https://www.php.net/archive/2026.php)
-- [GHSA-w8hw-w9fx-j79w](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w) — CVE-2026-109618
-- [GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp) — CVE-2026-109619
+- [PHP security announcement, 21 October 2026](https://www.php.net/archive/2026.php)
+- [GHSA-w8hw-w9fx-j79w](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w): CVE-2026-109618
+- [GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp): CVE-2026-109619
 - [Patch commit 3584a98](https://github.com/php/php-src/commit/3584a98bda)
+- [PHP-UP-2026 analysis, J4ck3LSyN](https://jackalsyn.com/posts/php-up-2026.html) (research: Andrew Dorman, Arch and Yuki)
 - [Sansec analysis](https://sansec.io/research/php2shell)
+
+## Contact
+
+Questions or concerns about this research: open a GitHub issue on this repo, or reach the maintainer profile at [github.com/dexteon](https://github.com/dexteon).
 
 ## License
 
@@ -203,4 +185,4 @@ MIT
 
 ## Disclaimer
 
-Use this only against systems you own or are authorized to test. The exploit has been tested against the Docker lab (Apache 2.4.68-69, Debian 12, PHP 8.4.x) and may not work unmodified against real-world targets with different compile-time options, ASLR configurations, or kernel parameters. Commands longer than 14 bytes require writing to `out/c`.
+This code is for authorized security testing, research, and education only. Do not run it against systems you do not own or lack written permission to test. The maintainers provide it to help defenders identify exposed systems and verify patches. Tested against the local Docker lab (Apache 2.4.x, Debian 12, PHP 8.x); real-world targets with different compile-time options, ASLR configurations, or kernel parameters need their own calibration and may not work unmodified.

@@ -1,2 +1,4 @@
 out/
 *.so
+__pycache__/
+*.pyc
