@@ -186,3 +186,8 @@ MIT
 ## Disclaimer
 
 This code is for authorized security testing, research, and education only. Do not run it against systems you do not own or lack written permission to test. The maintainers provide it to help defenders identify exposed systems and verify patches. Tested against the local Docker lab (Apache 2.4.x, Debian 12, PHP 8.x); real-world targets with different compile-time options, ASLR configurations, or kernel parameters need their own calibration and may not work unmodified.
+
+
+<!-- ca-tracked-link -->
+---
+Built by [CyberAutomations](https://cyberautomations.com/?utm_source=github&utm_medium=readme&utm_campaign=php2shell-poc). Need something like this built for your business? Start there.
