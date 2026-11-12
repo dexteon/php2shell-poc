@@ -17,7 +17,7 @@ Vendor advisories and patches: [php.net security archive](https://www.php.net/ar
 
 php2shell is the informal name for two PHP core vulnerabilities, CVE-2026-109618 and CVE-2026-109619. Both sit in the `session.upload_progress` machinery inside the PHP runtime, not in any application, so any PHP-powered site can be exposed. Both can lead to remote code execution as the web server user from an unauthenticated request.
 
-This repository holds `php2shell.py`, which has a read-only `check` mode for fingerprinting a server, two exploit vectors for a lab, and a `syms` mode for local binary analysis. The modes are listed in the table below.
+This repository holds `php2shell.py`. Its main use is the read-only `check` mode for fingerprinting a server and confirming patch state. It also has a `syms` mode for local binary analysis and an `exploit` mode that, in this public build, only probes whether the use-after-free path is reachable. The code-execution step has been removed, so nothing here runs a command on a target. The modes are listed in the table below.
 
 ```mermaid
 flowchart LR
@@ -33,11 +33,11 @@ flowchart LR
 | Mode | What it does | Traffic |
 |------|--------------|---------|
 | `check` | Fingerprints PHP version, SAPI type, and `upload_progress` state from response headers | Plain GET requests |
-| `exploit --vector uaf` | CVE-2026-109618 chain: session bucket use-after-free into a forged `zend_fcall_info` | Crafted multipart POSTs |
-| `exploit --vector pdetector` | CVE-2026-109619 chain: forged `pDestructor` into `zif_system` (stub; needs calibration data) | Crafted multipart POSTs |
+| `exploit --vector uaf` | CVE-2026-109618: sends the use-after-free reachability trigger and reports whether the path responds. The forged-call code-execution step is removed from this public build | Crafted multipart POSTs |
+| `exploit --vector pdetector` | CVE-2026-109619: stub only, prints calibration info and sends nothing | None |
 | `syms` | Extracts `zval_ptr_dtor` and `zend_call_function` offsets and their delta from a `libphp.so` ELF | Local binary analysis only |
 
-The default demo command is `id`, which prints `uid=...` and exits. Nothing in this repo drops a shell, writes files to the target, or persists anything.
+The `exploit` mode in this public build does not execute a command, drop a shell, write files to the target, or persist anything. It confirms reachability and stops. The `-c` option is kept for compatibility but is ignored.
 
 ## Am I affected
 
@@ -156,16 +156,16 @@ How to tell if a server you own is exposed:
 
 ## Running the proof of concept in a lab
 
-The exploit vectors are meant for a throwaway lab container, not for production or any host you do not own.
+The `exploit` mode is meant for a throwaway lab container, not for production or any host you do not own. In this public build it only probes whether the use-after-free path is reachable and then stops.
 
-### UAF vector against the Docker lab
+### UAF reachability probe against the Docker lab
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
-python3 php2shell.py exploit -u http://127.0.0.1:8088/index.php --vector uaf --command id
+python3 php2shell.py exploit -u http://127.0.0.1:8088/index.php --vector uaf
 ```
 
-The command must fit in 8 bytes (the forged record is 16 bytes total; 8 go to the leaked pointer). `id` is the default.
+It reports whether the trigger reaches the UAF path. It does not run a command or return a shell. The `-c` option is accepted but ignored.
 
 ### Symbol extraction
 
@@ -178,7 +178,7 @@ Prints `dtor_offset`, `call_offset`, and `delta` using readelf, objdump, or a by
 ### Exploit-mode options
 
 - `-u URL` target URL (required)
-- `-c CMD` command to execute (default `id`, max 8 bytes for UAF)
+- `-c CMD` accepted for compatibility but ignored; this build does not execute commands
 - `--vector uaf|pdetector` attack vector (default `uaf`)
 - `--dtor 0x...` DTOR leak address for UAF mode
 - `--delta 0x...` DTOR-to-call delta for UAF mode
@@ -200,7 +200,7 @@ ASLR is not a barrier for either chain, because the leaks read the heap and libp
 
 | Path | Purpose |
 |------|---------|
-| `php2shell.py` | Fingerprint, exploit, and symbol-extraction tooling |
+| `php2shell.py` | Fingerprint, UAF reachability probe, and symbol-extraction tooling |
 | `docker/docker-compose.yml` | Vulnerable lab container (Apache prefork, PHP 8.x) |
 | `docker/php.ini` | Lab PHP configuration |
 | `docker/apache.conf` | Single-worker prefork config |
