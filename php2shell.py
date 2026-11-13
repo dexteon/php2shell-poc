@@ -39,6 +39,13 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+# check mode detection now shares its signal logic with multi_tech_fingerprint.py
+# (same directory): favicon hash, header-order hash, HTML-structure hash,
+# Set-Cookie session markers, and the benign session.upload_progress probe,
+# on top of this file's original header/body/easter-egg/reveal-path checks.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import multi_tech_fingerprint as _mtf
+
 # ─── Colour helpers ───────────────────────────────────────────────────────────
 
 RED     = "\033[91m"
@@ -260,55 +267,45 @@ def check_upload_progress(host, port, path, use_socks=True, timeout=10, proxy=No
 # ─── Check mode ──────────────────────────────────────────────────────────────
 
 def fingerprint_target(url, timeout=10.0, proxy=None, use_socks=True):
-    """Send a GET request and extract PHP version info from the response.
-
-    This uses direct HTTP(S) via http.client, which cannot route through a
-    SOCKS proxy. The proxy arguments are accepted for interface compatibility
-    but the connection is always direct; use check_upload_progress for the
-    SOCKS-capable probe.
+    """Fingerprint a target using multi_tech_fingerprint.py's signal set
+    (headers, body, easter eggs, reveal paths, Set-Cookie markers, favicon
+    hash, header-order hash, HTML-structure hash, benign upload_progress
+    probe), then shape the result into this file's original top-level
+    fields (php_version, likely_vulnerable, sapi_type, upload_progress, ...)
+    so classify_result() / check_platform_compatibility() / run_exploit()
+    don't need to change. The proxy arguments are accepted for interface
+    compatibility but the detection probes are always direct (no SOCKS);
+    use check_upload_progress() below for the SOCKS-capable probe.
     """
-    parsed = urllib.parse.urlsplit(url if "://" in url else "https://" + url)
-    scheme = (parsed.scheme or "https").lower()
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or (443 if scheme == "https" else 80)
-    path = parsed.path or "/"
+    deep = _mtf.fingerprint_deep(url, timeout=timeout)
 
     result = {
-        "target": url, "http_status": 0, "x_powered_by": "",
-        "server": "", "php_version": None, "likely_vulnerable": None,
-        "upload_progress": False, "sapi_type": "unknown",
+        "target": url,
+        "http_status": deep.get("http_status", 0),
+        "x_powered_by": deep.get("x_powered_by", ""),
+        "server": deep.get("server", ""),
+        "php_version": None,
+        "likely_vulnerable": None,
+        "upload_progress": False,
+        "sapi_type": "unknown",
+        "technologies": deep.get("technologies", {}),
+        "inferred_technologies": deep.get("inferred_technologies", {}),
+        "signals": deep.get("signals", {}),
     }
-    try:
-        if scheme == "https":
-            conn = http.client.HTTPSConnection(host, port, timeout=timeout,
-                                               context=ssl._create_unverified_context())
-        else:
-            conn = http.client.HTTPConnection(host, port, timeout=timeout)
-
-        conn.request("GET", path, headers={"Host": host, "User-Agent": "php2shell-check/1.0", "Connection": "close"})
-        response = conn.getresponse()
-        result["http_status"] = response.status
-        result["x_powered_by"] = response.getheader("X-Powered-By", "")
-        result["server"] = response.getheader("Server", "")
-        body = response.read(8192).decode("latin1", "replace")
-        conn.close()
-    except Exception as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"
+    if not result["http_status"]:
+        result["error"] = "unreachable"
         return result
 
-    version, known = extract_php_version(result["x_powered_by"])
-    source = "header"
-    if version is None:
-        version, known = extract_php_version(body)
-        source = "body" if version else None
+    php_info = deep.get("technologies", {}).get("php")
+    if php_info:
+        result["php_version"] = php_info.get("version")
+        result["likely_vulnerable"] = php_info.get("vulnerable")
+        result["version_source"] = php_info.get("version_source") or "/".join(php_info.get("evidence", []))
+        result["sapi_type"] = php_info.get("sapi_type", "unknown")
+        result["upload_progress"] = "upload_progress" in php_info.get("evidence", [])
+    else:
+        result["sapi_type"] = _detect_sapi(result["server"], result["x_powered_by"])
 
-    if version:
-        major, minor, patch = version
-        result["php_version"] = f"{major}.{minor}.{patch}" if known else f"{major}.{minor}.?"
-        result["likely_vulnerable"] = is_likely_vulnerable(version, known)
-        result["version_source"] = source
-
-    result["sapi_type"] = _detect_sapi(result["server"], result["x_powered_by"])
     return result
 
 def classify_result(fp):
@@ -380,6 +377,7 @@ def run_check_mode(args):
     total = len(targets)
     workers = min(args.workers, total)
     vector = getattr(args, "vector", "pdetector") or "pdetector"
+    multi_tech = getattr(args, "multi_tech", False)
 
     output_path = Path(args.output) if args.output else None
     if output_path:
@@ -388,7 +386,18 @@ def run_check_mode(args):
     proxy = getattr(args, "proxy", None) or None
 
     def do_fingerprint(url):
-        return fingerprint_target(url, timeout=args.timeout, proxy=proxy)
+        if multi_tech:
+            # Import and use multi-tech fingerprinting
+            from multi_tech_fingerprint import fingerprint_deep, TECH_PATTERNS
+            # Filter tech patterns if --tech specified
+            if args.tech:
+                selected = set(args.tech.split(","))
+                for k in list(TECH_PATTERNS.keys()):
+                    if k not in selected:
+                        del TECH_PATTERNS[k]
+            return fingerprint_deep(url, timeout=args.timeout, do_favicon=not args.no_favicon)
+        else:
+            return fingerprint_target(url, timeout=args.timeout, proxy=proxy)
 
     # BUG-01: Collect fingerprints into a list for JSON output and summary
     fp_results = []
@@ -406,7 +415,7 @@ def run_check_mode(args):
         elif status == "unreachable":
             tag = f"{_red('[UNREACHABLE]')}"
         else:
-            tag = f"{_yellow('[{status.upper()}]')}"
+            tag = f"{_yellow(f'[{status.upper()}]')}"
         if not args.quiet:
             prefix = f"[{count}/{total}] " if total > 1 else ""
             print(f"{prefix}{tag} {host}  PHP {version}  SAPI {sapi}", flush=True)
@@ -428,6 +437,11 @@ def run_check_mode(args):
             done_count += 1
             format_report(fp, done_count)
         executor.shutdown(wait=True)
+
+    # Post-scan clustering for multi-tech
+    if multi_tech and not args.no_cluster:
+        from multi_tech_fingerprint import cluster_by_signals
+        fp_results = cluster_by_signals(fp_results)
 
     # BUG-01: JSON output uses results list, not raw targets
     if args.json and fp_results:
@@ -453,7 +467,10 @@ def build_multipart_payload(parts, boundary):
         body += b"--" + boundary + b"\r\n"
         body += b'Content-Disposition: form-data; name="' + name + b'"'
         if part.get("filename") is not None:
-            body += b'; filename="' + part["filename"].encode() + b'"'
+            filename = part["filename"]
+            if isinstance(filename, str):
+                filename = filename.encode()
+            body += b'; filename="' + filename + b'"'
             body += b"\r\nContent-Type: application/octet-stream"
         body += b"\r\n\r\n" + part["data"] + b"\r\n"
     body += b"--" + boundary + b"--\r\n"
@@ -969,7 +986,7 @@ def run_exploit(args):
             print(f"  [-] Invalid --delta: {args.delta}", file=sys.stderr)
             return 1
 
-    command = getattr(args, "command", "id") or "id"
+    command = getattr(args, "exec_command", "id") or "id"
     vector = getattr(args, "vector", "uaf") or "uaf"
     syms_path = getattr(args, "syms", None)
 
@@ -1031,11 +1048,16 @@ Examples:
     check_parser.add_argument("--output", "-o", help="Output file for JSON lines")
     check_parser.add_argument("--json", action="store_true", help="Output as JSON")
     check_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
+    # Multi-technology fingerprint options
+    check_parser.add_argument("--multi-tech", action="store_true", help="Enable multi-technology fingerprint (PHP, Node.js, Python, Java, Go, .NET, Ruby, Perl)")
+    check_parser.add_argument("--tech", help="Comma-separated list of technologies to detect (default: all)")
+    check_parser.add_argument("--no-favicon", action="store_true", help="Skip favicon hash fetch")
+    check_parser.add_argument("--no-cluster", action="store_true", help="Skip post-scan clustering pass")
 
     # Exploit subcommand
     exploit_parser = subparsers.add_parser("exploit", help="Probe UAF reachability (no code execution in this public build)")
     exploit_parser.add_argument("-u", "--url", required=True, help="Target URL")
-    exploit_parser.add_argument("-c", "--command", default="id",
+    exploit_parser.add_argument("-c", "--cmd", default="id", dest="exec_command",
                                help="Retained for compatibility; NOT executed (payload delivery removed from this public build)")
     exploit_parser.add_argument("--calib", help="Calibration file (key=value)")
     exploit_parser.add_argument("--syms", help="Extract offsets from libphp.so binary")
