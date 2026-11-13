@@ -360,16 +360,53 @@ def load_target_list(path):
     seen = set()
     return [u for u in results if not (u in seen or seen.add(u))]
 
+
+def load_targets_from_csv(path, ip_col="ip_address", port_col="open_ports"):
+    """Read targets from a CSV file with IP address and port columns.
+    
+    Expected CSV format:
+    ip_address,open_ports
+    192.168.1.1,80,443,8080
+    10.0.0.1,80
+    
+    For each IP, generates URLs for each port in open_ports (comma-separated).
+    """
+    import csv
+    results = []
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            ip = row.get(ip_col, "").strip()
+            if not ip:
+                continue
+            ports_str = row.get(port_col, "").strip()
+            if not ports_str:
+                continue
+            ports = [p.strip() for p in ports_str.split(",") if p.strip()]
+            for port in ports:
+                try:
+                    port_num = int(port)
+                except ValueError:
+                    continue
+                scheme = "https" if port_num in (443, 8443) else "http"
+                host = f"{ip}:{port_num}" if port_num not in (80, 443) else ip
+                url = f"{scheme}://{host}/"
+                results.append(url)
+    seen = set()
+    return [u for u in results if not (u in seen or seen.add(u))]
+
 def run_check_mode(args):
     """Execute check mode against one or more targets."""
     targets = []
     if args.file:
         targets.extend(load_target_list(args.file))
+    if args.csv:
+        targets.extend(load_targets_from_csv(args.csv, args.csv_ip_col, args.csv_port_col))
     if args.url:
         url = args.url if "://" in args.url else "https://" + args.url
         targets.append(url)
     if not targets:
-        print(f"{_red('[-] provide URL or -f/--file')}", file=sys.stderr)
+        print(f"{_red('[-] provide URL or -f/--file or --csv')}", file=sys.stderr)
         return 2
 
     seen = set()
@@ -1042,6 +1079,9 @@ Examples:
     check_parser = subparsers.add_parser("check", help="Check target(s) for php2shell vulnerability")
     check_parser.add_argument("-u", "--url", help="Target URL")
     check_parser.add_argument("-f", "--file", help="File with one URL per line")
+    check_parser.add_argument("--csv", help="CSV file with ip_address,open_ports columns")
+    check_parser.add_argument("--csv-ip-col", default="ip_address", help="CSV column name for IP address (default: ip_address)")
+    check_parser.add_argument("--csv-port-col", default="open_ports", help="CSV column name for open ports (default: open_ports)")
     check_parser.add_argument("-w", "--workers", type=int, default=5, help="Parallel workers")
     check_parser.add_argument("-t", "--timeout", type=float, default=10.0, help="Request timeout")
     check_parser.add_argument("--proxy", help="SOCKS5 proxy host:port (overrides PHP2SHELL_PROXY env var)")
