@@ -33,6 +33,7 @@ flowchart LR
 | Mode | What it does | Traffic |
 |------|--------------|---------|
 | `check` | Fingerprints PHP version, SAPI type, and `upload_progress` state from response headers | Plain GET requests |
+| `check --multi-tech` | **NEW:** Multi-technology fingerprint (PHP, Node.js, Python, Java, Go, .NET, Ruby, Perl) with version detection, easter eggs, reveal paths, cookie markers, and benign upload_progress probe | GET + optional POST + reveal path requests |
 | `exploit --vector uaf` | CVE-2026-109618: sends the use-after-free reachability trigger and reports whether the path responds. The forged-call code-execution step is removed from this public build | Crafted multipart POSTs |
 | `exploit --vector pdetector` | CVE-2026-109619: stub only, prints calibration info and sends nothing | None |
 | `syms` | Extracts `zval_ptr_dtor` and `zend_call_function` offsets and their delta from a `libphp.so` ELF | Local binary analysis only |
@@ -69,6 +70,65 @@ Output:
 ```
 [VULNERABLE] http://target.example.com/  PHP 8.4.26  SAPI mod_php
 [PATCHED]   http://fixed.example.com/     PHP 8.4.27  SAPI mod_php
+```
+
+### Multi-technology fingerprint (NEW)
+
+The `--multi-tech` flag enables a comprehensive web technology scan that detects PHP, Node.js, Python, Java, Go, .NET, Ruby, and Perl. It uses multiple techniques:
+
+- Standard headers (Server, X-Powered-By) and body text
+- PHP easter eggs (`expose_php=On` in PHPINFO paths)
+- Common reveal paths (`/info.php`, `/phpinfo.php`, `/i.php`, `/package.json`, `/actuator/health`, etc.)
+- Set-Cookie session name markers (PHPSESSID, JSESSIONID, ASP.NET_SessionId, connect.sid, etc.)
+- Benign `session.upload_progress` probe (PHP-specific, no exploit payload)
+- Favicon mmh3 hash and header-order/HTML-structure hashes for clustering similar hosts
+- Post-scan clustering pass that tags OTHER members of a cluster as "inferred" when one member has a confirmed detection
+
+```bash
+# Single target
+python3 php2shell.py check -u http://target.example.com/ --multi-tech
+
+# Bulk scan with JSONL output
+python3 php2shell.py check -f targets.txt -o results.jsonl --multi-tech -w 50 -t 3.0
+
+# Options
+#   --tech PHP,Node.js,Go  (comma-separated, default: all 8 technologies)
+#   --no-favicon           (skip favicon hash fetch)
+#   --no-cluster           (skip post-scan clustering)
+```
+
+Output (JSONL, one line per target):
+
+```json
+{
+  "target": "http://target.example.com/",
+  "http_status": 200,
+  "server": "nginx/1.20.1",
+  "x_powered_by": "PHP/7.2.9",
+  "technologies": {
+    "php": {
+      "version": "7.2.9",
+      "version_source": "header:x_powered_by",
+      "detected": true,
+      "vulnerable": true,
+      "evidence": ["header:x_powered_by"],
+      "sapi_type": "mod_php"
+    },
+    "go": {
+      "version": null,
+      "version_source": "",
+      "detected": true,
+      "vulnerable": null,
+      "evidence": ["header:server"]
+    }
+  },
+  "techniques": ["header:x_powered_by", "header:server"],
+  "signals": {
+    "favicon_hash": -1234567890,
+    "header_order_hash": "abc123def456",
+    "html_structure_hash": "fed456cba321"
+  }
+}
 ```
 
 ### Check it from the host itself
